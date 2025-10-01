@@ -97,7 +97,7 @@ execute:
 - `physical_strength`: 제품 강도 (예: 700, 0 …)  
 
 ###  평가
-- `passorfail`: 합격 여부 (예: 0=불량, 1=합격)  
+- `passorfail`: 합격 여부 (예: 1=불량, 0=합격)  
 
 
 

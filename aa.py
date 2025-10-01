@@ -2,177 +2,166 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from scipy import stats
+from sklearn.preprocessing import StandardScaler
+import warnings
+import plotly.express as px
+import plotly.graph_objects as go
 
-# 데이터 로드 및 전처리
+warnings.filterwarnings('ignore')
+
+# 그래프 한글 깨짐 방지
+plt.rcParams['font.family'] = 'Malgun Gothic'
+plt.rcParams['axes.unicode_minus'] = False
+plt.style.use('seaborn-v0_8')
+
+# 데이터 로딩
 train = pd.read_csv("./data/train.csv")
 test = pd.read_csv("./data/test.csv")
 
-train = train.drop(['id', 'line', 'name', 'mold_name', 'time', 'date', 'registration_time'], axis=1)
 
-print("=== 데이터 기본 정보 ===")
-print(f"전체 데이터 수: {len(train)}")
-print(f"양품(0) 개수: {sum(train['passorfail'] == 0)}")
-print(f"불량품(1) 개수: {sum(train['passorfail'] == 1)}")
-print(f"불량률: {sum(train['passorfail'] == 1) / len(train) * 100:.2f}%")
+# datetime & hour 생성
+train['datetime'] = pd.to_datetime(train['date'] + " " + train['time'])
+train['hour'] = train['datetime'].dt.hour
 
-print("\n=== 결측값 확인 ===")
-missing_values = train.isnull().sum()
-if missing_values.sum() > 0:
-    print(missing_values[missing_values > 0])
-else:
-    print("결측값이 없습니다.")
+# shift (Day/Night 교대조) 생성
 
-# 1. 피어슨 상관계수 분석
-print("\n=== 1. 피어슨 상관계수 분석 ===")
-numeric_columns = train.select_dtypes(include=[np.number]).columns
-numeric_columns = numeric_columns.drop('passorfail')
+first_hour = train.loc[0, 'hour']
+if 8 <= first_hour <= 19:   # 08:00 ~ 19:59 → Day
+    current_shift = "Day"
+else:                       # 20:00 ~ 07:59 → Night
+    current_shift = "Night"
 
-correlations = []
-for col in numeric_columns:
-    if train[col].dtype in ['int64', 'float64']:
-        corr_coef = train[col].corr(train['passorfail'])
-        correlations.append({'변수': col, '상관계수': corr_coef, '절대값': abs(corr_coef)})
+shifts = []
+for i in range(len(train)):
+    if i == 0:
+        shifts.append(current_shift)
+        continue
 
-correlation_df = pd.DataFrame(correlations).sort_values('절대값', ascending=False)
-print(correlation_df.round(4))
+    if train.loc[i, 'count'] < train.loc[i-1, 'count']:  # count 감소 → 리셋
+        h = train.loc[i, 'hour']
+        if (8 <= h <= 19 and current_shift == "Night") or (h >= 20 or h < 8 and current_shift == "Day"):
+            current_shift = "Night" if current_shift == "Day" else "Day"
+    shifts.append(current_shift)
 
-# 2. 점이연 상관계수 (Point-biserial correlation) - 더 정확한 방법
-print("\n=== 2. 점이연 상관계수 분석 ===")
-pb_correlations = []
-for col in numeric_columns:
-    if train[col].dtype in ['int64', 'float64']:
-        # 양품과 불량품 그룹으로 나누기
-        good_products = train[train['passorfail'] == 0][col]
-        defective_products = train[train['passorfail'] == 1][col]
-        
-        # 점이연 상관계수 계산
-        pb_corr = stats.pointbiserialr(train['passorfail'], train[col])[0]
-        p_value = stats.pointbiserialr(train['passorfail'], train[col])[1]
-        
-        pb_correlations.append({
-            '변수': col, 
-            '점이연상관계수': pb_corr, 
-            'p-value': p_value,
-            '절대값': abs(pb_corr),
-            '유의성': 'significant' if p_value < 0.05 else 'not significant'
-        })
+train['shift'] = shifts
+print("shift 컬럼 생성 완료 (Day/Night)")
 
-pb_correlation_df = pd.DataFrame(pb_correlations).sort_values('절대값', ascending=False)
-print(pb_correlation_df.round(4))
+train = train.sort_values(by="datetime").reset_index(drop=True)
 
-# 3. 각 변수별 양품/불량품 평균 비교
-print("\n=== 3. 양품/불량품 평균 비교 (상위 10개 변수) ===")
-top_10_vars = pb_correlation_df.head(10)['변수'].tolist()
+# ------------------------------
+# 1) 글로벌 누적 count (전체 기간)
+# ------------------------------
+global_counts = []
+accum = 0
+prev_count = train.loc[0, 'count']
 
-comparison_results = []
-for col in top_10_vars:
-    good_mean = train[train['passorfail'] == 0][col].mean()
-    defect_mean = train[train['passorfail'] == 1][col].mean()
-    diff_pct = ((defect_mean - good_mean) / good_mean * 100) if good_mean != 0 else 0
+for i, row in train.iterrows():
+    current_count = row['count']
     
-    comparison_results.append({
-        '변수': col,
-        '양품_평균': good_mean,
-        '불량품_평균': defect_mean,
-        '차이(%)': diff_pct
-    })
+    # count가 리셋된 경우
+    if current_count < prev_count:
+        accum += prev_count  # 지금까지 생산량을 누적
+    global_counts.append(accum + current_count)
+    prev_count = current_count
 
-comparison_df = pd.DataFrame(comparison_results)
-print(comparison_df.round(3))
+train['global_count'] = global_counts
 
-# 4. t-검정으로 유의성 확인 (상위 10개 변수)
-print("\n=== 4. t-검정 결과 (상위 10개 변수) ===")
-ttest_results = []
-for col in top_10_vars:
-    good_data = train[train['passorfail'] == 0][col].dropna()
-    defect_data = train[train['passorfail'] == 1][col].dropna()
+# ------------------------------
+# 2) 월별 누적 count
+# ------------------------------
+train['year_month'] = train['datetime'].dt.to_period("M")  # 연-월 단위
+train['monthly_count'] = train.groupby('year_month').cumcount() + 1
+
+# 파생 변수 생성
+
+train['real_time'] = train['date'] + " " + train['time']
+train['speed_ratio'] = train['low_section_speed'] / train['high_section_speed']
+train['pressure_speed_ratio'] = train['cast_pressure'] / train['high_section_speed']
+
+# 불필요한 컬럼 제거
+
+drop_columns = [ 'id', 'line', 'name', 'mold_name', 'date', 'time', 'registration_time','year_month','hour','datetime']
+train = train.drop(columns=drop_columns)
+
+# real_time 컬럼을 datetime으로 변환
+train['real_time'] = pd.to_datetime(train['real_time'])
+
+train.head()
+train = train.sort_values(by='real_time', ascending=True).reset_index(drop=True)
+
+
+train.isna().sum()
+train = train.dropna(subset=['low_section_speed'])
+
+train[train['speed_ratio'].isna()]
+train['speed_ratio'] = train['speed_ratio'].fillna(-1)
+
+
+
+# 확인할 컬럼 목록 (passorfail, real_time, status 제외)
+cols = [c for c in train.columns if c not in ['passorfail', 'real_time', 'status']]
+
+
+
+for col in cols:
+    # 기본 라인 그래프 (status 별 색상 구분)
+    fig = px.line(train, x='real_time', y=col, color='status',
+                  title=f"{col} 시간 분포 (불량 vs 정상)",
+                  labels={'real_time': '시간', col: col, 'status': '상태'})
     
-    t_stat, p_val = stats.ttest_ind(good_data, defect_data)
+    # tryshot_signal == 'D' 인 값만 필터링
+    subset = train[train['tryshot_signal'] == 'D']
     
-    ttest_results.append({
-        '변수': col,
-        't-통계량': t_stat,
-        'p-value': p_val,
-        '유의성': 'significant' if p_val < 0.05 else 'not significant'
-    })
-
-ttest_df = pd.DataFrame(ttest_results)
-print(ttest_df.round(6))
-
-# 5. 상관관계 시각화
-plt.figure(figsize=(15, 10))
-
-# 상위 15개 변수의 상관계수 막대그래프
-top_15_vars = pb_correlation_df.head(15)
-plt.subplot(2, 2, 1)
-bars = plt.bar(range(len(top_15_vars)), top_15_vars['점이연상관계수'])
-plt.xticks(range(len(top_15_vars)), top_15_vars['변수'], rotation=45, ha='right')
-plt.ylabel('점이연 상관계수')
-plt.title('품질(passorfail)과의 상관관계 (상위 15개)')
-plt.grid(axis='y', alpha=0.3)
-
-# 양의 상관관계는 빨간색, 음의 상관관계는 파란색으로 색칠
-for i, bar in enumerate(bars):
-    if top_15_vars.iloc[i]['점이연상관계수'] > 0:
-        bar.set_color('red')
-    else:
-        bar.set_color('blue')
-
-plt.tight_layout()
-plt.show()
-
-# 6. 히트맵으로 전체 상관관계 매트릭스 표시 (상위 20개 변수)
-top_20_vars = pb_correlation_df.head(20)['변수'].tolist()
-selected_data = train[top_20_vars + ['passorfail']]
-
-plt.figure(figsize=(12, 10))
-correlation_matrix = selected_data.corr()
-mask = np.triu(np.ones_like(correlation_matrix))
-sns.heatmap(correlation_matrix, 
-            annot=True, 
-            cmap='RdBu_r', 
-            center=0,
-            square=True,
-            fmt='.3f',
-            cbar_kws={"shrink": .8})
-plt.title('상관관계 매트릭스 (상위 20개 변수 + passorfail)')
-plt.tight_layout()
-plt.show()
-
-print("\n=== 분석 요약 ===")
-print("1. 상관계수의 절대값이 클수록 품질과 더 강한 관계가 있음")
-print("2. 양의 상관관계: 값이 클수록 불량품일 가능성이 높음")
-print("3. 음의 상관관계: 값이 클수록 양품일 가능성이 높음")
-print("4. p-value < 0.05인 경우 통계적으로 유의한 관계")
-
-# 가장 중요한 변수들 요약
-print(f"\n=== 품질에 가장 영향을 주는 상위 5개 변수 ===")
-top_5 = pb_correlation_df.head(5)
-for idx, row in top_5.iterrows():
-    direction = "불량 증가" if row['점이연상관계수'] > 0 else "불량 감소"
-    print(f"{row['변수']}: 상관계수 {row['점이연상관계수']:.4f} ({direction})")
-
-
+    # 초록색 점 추가 (Scatter trace)
+    fig.add_trace(
+        go.Scatter(
+            x=subset['real_time'],
+            y=subset[col],
+            mode='markers',
+            marker=dict(color='green', size=6),
+            name="tryshot_signal = D"
+        )
+    )
     
-# 7. ���� �ڵ�� �ҷ� ����(passorfail)�� ���� ������׷�
-# ���� 10�� ���� �ڵ常 �ð�ȭ�ؼ� �������� �����մϴ�.
-top_molds = train['mold_code'].value_counts().head(10).index
-filtered_mold = train[train['mold_code'].isin(top_molds)]
+    fig.show()
 
-plt.figure(figsize=(12, 6))
-sns.histplot(
-    data=filtered_mold,
-    x='mold_code',
-    hue='passorfail',
-    multiple='dodge',
-    shrink=0.8,
-    discrete=True,
-    palette={0: '#4C72B0', 1: '#DD8452'}
+train.head()
+
+molten_temp	facility_operation_cycleTime	production_cycletime	low_section_speed	high_section_speed	molten_volume	cast_pressure 온도까지 다안나와
+
+
+# 결측치는 -1로 대체
+train['molten_temp'] = train['molten_temp'].fillna(-1)
+
+
+
+# 불량/정상 라벨링
+train['status'] = train['passorfail'].map({1: "불량", 0: "정상"})
+# tryshot_signal == 'D' 데이터만 따로 추출
+subset = train[train['tryshot_signal'] == 'D']
+
+# 기본 라인 그래프
+fig = px.line(
+    train, 
+    x='real_time', 
+    y='molten_temp', 
+    color='status',
+    title="molten_temp 시간 분포 (불량 vs 정상)",
+    labels={'real_time': '시간', 'molten_temp': 'molten_temp', 'status': '상태'}
 )
-plt.title('���� �ڵ庰 ��ǰ/�ҷ� ������׷� (Top 10)')
-plt.xlabel('mold_code')
-plt.ylabel('count')
-plt.xticks(rotation=45)
-plt.tight_layout()
-plt.show()
+
+# D인 경우 초록색 점 표시
+if not subset.empty:
+    fig.add_trace(
+        go.Scatter(
+            x=subset['real_time'],
+            y=subset['molten_temp'],
+            mode='markers',
+            marker=dict(color='green', size=6),
+            name="tryshot_signal = D"
+        )
+    )
+
+fig.show()
+
+train['mold_code'].unique() [8722, 8412, 8573, 8917, 8600]
