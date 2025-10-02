@@ -1,0 +1,12 @@
+{
+    "https://api.shinyapps.io": {
+        "server_url": "https://api.shinyapps.io",
+        "filename": "C:\\Users\\USER\\Documents\\DS Projects\\Project-1-Data-Driven-Modeling-of-the-Casting-Process",
+        "app_url": "https://spicywinter.shinyapps.io/main_proj1_team2/",
+        "app_id": "15618550",
+        "app_guid": null,
+        "title": "Die-casting_main_proj1_team2",
+        "app_mode": "python-shiny",
+        "app_store_version": 1
+    }
+}
